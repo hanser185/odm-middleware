@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.gitignore
+.idea/
+
+# 大文件/原始数据不打包进镜像
+images/
+20260424170228*/
+result/
+result_diff.jpg
+
+# 文档/测试不打包进镜像
+docs/
+tests/
+README.md
+odmdemo.py
+example_usage.py
+默认模块.md

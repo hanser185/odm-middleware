@@ -1,0 +1,43 @@
+services:
+  # NodeODM 处理服务（仅内部网络访问）
+  nodeodm:
+    image: opendronemap/nodeodm:gpu
+    expose:
+      - "3000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - odm_net
+
+  # FastAPI 中间件服务（对内访问 NodeODM，对外暴露 8000）
+  odm-middleware:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - NODEODM_HOST=nodeodm
+      - NODEODM_PORT=3000
+    depends_on:
+      nodeodm:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - odm_net
+
+networks:
+  odm_net:
+    driver: bridge

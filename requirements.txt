@@ -3,3 +3,5 @@ uvicorn[standard]==0.27.0
 pyodm==1.5.9
 python-multipart==0.0.6
 pydantic==2.5.3
+paho-mqtt==2.1.0
+httpx==0.26.0

@@ -4,14 +4,20 @@
 
 ## 功能特性
 
-- ✅ 支持多张无人机照片上传
+- ✅ 支持多张无人机照片上传（JPG/PNG/TIFF）
+- ✅ 上传文件类型、大小、文件名安全校验
 - ✅ 自动生成正射影像 (GeoTIFF)
-- ✅ 异步任务处理
-- ✅ 实时进度查询
-- ✅ 结果下载（单文件或 ZIP 包）
-- ✅ Docker 容器化部署（含健康检查）
+- ✅ 异步任务处理，Webhook 回调同步状态
+- ✅ MQTT 实时推送任务状态变更
+- ✅ CORS 跨域支持
+- ✅ 任务列表、进度查询、结果下载
+- ✅ 正射影像下载（单文件 TIFF 或 ZIP 包）
+- ✅ 任务取消与删除
+- ✅ NodeODM 服务节点信息与处理选项查询
+- ✅ Docker 容器化部署（多阶段构建 + 非 root 用户）
 - ✅ 后台自动清理过期任务（24 小时 TTL）
 - ✅ 任务状态查询自动回写本地缓存
+- ✅ 任务在 NodeODM 侧被删除时自动同步清理本地记录
 
 ## 快速开始
 
@@ -112,7 +118,34 @@ curl -o orthophoto.tif "http://localhost:8000/api/v1/download/{task_id}"
 curl -o results.zip "http://localhost:8000/api/v1/download/{task_id}/zip"
 ```
 
-### 5. 健康检查
+### 5. 列出所有任务
+
+```bash
+curl "http://localhost:8000/api/v1/tasks"
+```
+
+响应：
+```json
+[
+  {
+    "task_id": "550e8400-e29b-41d4-a716-446655440000",
+    "name": "航拍-北大荒",
+    "status": "completed",
+    "progress": 100.0,
+    "images_count": 36,
+    "created_at": "2026-05-27T09:20:06+00:00",
+    "error": null
+  }
+]
+```
+
+### 6. 取消/删除任务
+
+```bash
+curl -X DELETE "http://localhost:8000/api/v1/tasks/{task_id}"
+```
+
+### 7. 健康检查
 
 ```bash
 curl "http://localhost:8000/health"
@@ -164,6 +197,13 @@ with open("orthophoto.tif", "wb") as f:
 | NODEODM_HOST | NodeODM 服务地址 | localhost |
 | NODEODM_PORT | NodeODM 服务端口 | 3000 |
 | NODEODM_TOKEN | NodeODM 认证令牌 | (空) |
+| WEBHOOK_BASE_URL | NodeODM 回调中间件的地址 | http://odm-middleware:8000 |
+| MQTT_HOST | MQTT 服务器地址（留空跳过 MQTT） | (空) |
+| MQTT_PORT | MQTT 服务器端口 | 1883 |
+| MQTT_USERNAME | MQTT 用户名 | (空) |
+| MQTT_PASSWORD | MQTT 密码 | (空) |
+| MQTT_TOPIC_PREFIX | MQTT 主题前缀 | odm |
+| MAX_UPLOAD_SIZE_MB | 单文件上传上限（MB） | 500 |
 | TASK_TTL_HOURS | 任务本地目录保留时长（超时自动清理） | 24 |
 | CLEANUP_INTERVAL | 后台清理检查间隔（秒） | 3600 |
 

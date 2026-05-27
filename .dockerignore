@@ -11,9 +11,8 @@ images/
 result/
 result_diff.jpg
 
-# 文档/测试不打包进镜像
+# 文档不打包进镜像
 docs/
-tests/
 README.md
 odmdemo.py
 example_usage.py

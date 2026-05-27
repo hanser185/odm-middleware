@@ -1,0 +1,684 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "ODM 正射影像生成服务",
+    "description": "基于 NodeODM 的无人机照片处理服务，支持上传照片、创建处理任务、查询状态、下载正射影像等。",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8000",
+      "description": "本地开发"
+    }
+  ],
+  "paths": {
+    "/api/v1/process": {
+      "post": {
+        "summary": "创建处理任务",
+        "description": "上传无人机照片并创建正射影像处理任务，支持自定义 ODM 处理参数。",
+        "operationId": "processImages",
+        "tags": ["任务管理"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["files"],
+                "properties": {
+                  "files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "binary",
+                      "description": "无人机拍摄的照片文件"
+                    },
+                    "description": "照片文件列表（支持 JPEG/PNG/TIFF）"
+                  },
+                  "options": {
+                    "type": "string",
+                    "default": "{}",
+                    "description": "ODM 处理选项 JSON 字符串，覆盖默认配置。可用选项见 GET /api/v1/node/options"
+                  },
+                  "name": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "自定义任务名称，不传则自动生成"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "任务创建成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TaskResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数错误（无文件、不支持的文件类型等）",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "413": {
+            "description": "文件大小超过限制",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "503": {
+            "description": "NodeODM 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/webhook/{task_id}": {
+      "post": {
+        "summary": "NodeODM 任务回调",
+        "description": "NodeODM 在处理任务状态变更时回调此接口，用于同步任务状态并触发 MQTT 通知。此接口由 NodeODM 内部调用，通常无需客户端调用。",
+        "operationId": "taskWebhook",
+        "tags": ["系统内部"],
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" },
+            "description": "任务 UUID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "回调接收成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "received": { "type": "boolean", "example": true }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "NodeODM 暂时不可用",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/status/{task_id}": {
+      "get": {
+        "summary": "查询任务状态",
+        "description": "根据任务 ID 查询当前处理进度和状态。已完成或失败的任务会从本地缓存读取，运行中的任务会实时查询 NodeODM。",
+        "operationId": "getTaskStatus",
+        "tags": ["任务管理"],
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" },
+            "description": "任务 UUID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "任务状态信息",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TaskStatus" }
+              }
+            }
+          },
+          "400": {
+            "description": "无效的任务 ID 格式",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "任务不存在",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "503": {
+            "description": "NodeODM 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/download/{task_id}": {
+      "get": {
+        "summary": "下载正射影像",
+        "description": "下载任务生成的正射影像 GeoTIFF 文件。仅任务状态为 completed 时可下载。",
+        "operationId": "downloadOrthophoto",
+        "tags": ["任务管理"],
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" },
+            "description": "任务 UUID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "正射影像 TIFF 文件流",
+            "content": {
+              "image/tiff": {
+                "schema": { "type": "string", "format": "binary" }
+              }
+            }
+          },
+          "400": {
+            "description": "任务未完成",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "任务不存在或影像文件不存在",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "503": {
+            "description": "NodeODM 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/download/{task_id}/zip": {
+      "get": {
+        "summary": "下载全部处理结果",
+        "description": "下载任务的所有输出文件（正射影像、DEM、点云、模型等）打包为 ZIP 文件。仅任务状态为 completed 时可下载。",
+        "operationId": "downloadAllAssets",
+        "tags": ["任务管理"],
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" },
+            "description": "任务 UUID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ZIP 压缩包文件流",
+            "content": {
+              "application/zip": {
+                "schema": { "type": "string", "format": "binary" }
+              }
+            }
+          },
+          "400": {
+            "description": "任务未完成",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "任务不存在",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "503": {
+            "description": "NodeODM 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{task_id}": {
+      "delete": {
+        "summary": "取消并删除任务",
+        "description": "取消正在运行或队列中的任务，并从 NodeODM 和本地同时删除任务数据。",
+        "operationId": "cancelTask",
+        "tags": ["任务管理"],
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" },
+            "description": "任务 UUID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "任务已删除",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string", "example": "任务已删除" },
+                    "task_id": { "type": "string", "format": "uuid", "example": "550e8400-e29b-41d4-a716-446655440000" }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "任务不存在",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "503": {
+            "description": "NodeODM 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/node/info": {
+      "get": {
+        "summary": "获取 NodeODM 节点信息",
+        "description": "查询 NodeODM 服务的版本、引擎、CPU/内存资源、任务队列状态等信息。",
+        "operationId": "getNodeInfo",
+        "tags": ["节点管理"],
+        "responses": {
+          "200": {
+            "description": "节点信息",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/NodeInfo" }
+              }
+            }
+          },
+          "503": {
+            "description": "NodeODM 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/node/options": {
+      "get": {
+        "summary": "获取 ODM 处理选项列表",
+        "description": "查询 NodeODM 支持的所有 ODM 处理参数，包括名称、类型、默认值、说明和取值范围。",
+        "operationId": "getNodeOptions",
+        "tags": ["节点管理"],
+        "responses": {
+          "200": {
+            "description": "ODM 选项数组",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/OdmOption" }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "NodeODM 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tasks": {
+      "get": {
+        "summary": "列出所有任务",
+        "description": "列出所有历史任务记录，从本地缓存按创建时间倒序返回。已完成/失败/队列中的任务均包含在内。",
+        "operationId": "listTasks",
+        "tags": ["任务管理"],
+        "responses": {
+          "200": {
+            "description": "任务列表数组",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/TaskSummary" }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "无效的任务 ID 格式",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "健康检查",
+        "description": "服务健康检查接口，同时反馈 NodeODM 的连接状态。",
+        "operationId": "healthCheck",
+        "tags": ["系统内部"],
+        "responses": {
+          "200": {
+            "description": "健康状态（即使 NodeODM 不可用也返回 200）",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HealthCheck" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "TaskResponse": {
+        "type": "object",
+        "required": ["task_id", "status", "message"],
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "任务唯一标识",
+            "example": "550e8400-e29b-41d4-a716-446655440000"
+          },
+          "status": {
+            "type": "string",
+            "description": "任务状态",
+            "example": "queued"
+          },
+          "message": {
+            "type": "string",
+            "description": "提示信息",
+            "example": "任务已创建，共 50 张照片"
+          }
+        }
+      },
+      "TaskStatus": {
+        "type": "object",
+        "required": ["task_id", "status", "progress", "images_count"],
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "任务唯一标识",
+            "example": "550e8400-e29b-41d4-a716-446655440000"
+          },
+          "status": {
+            "type": "string",
+            "description": "任务状态",
+            "enum": ["queued", "running", "completed", "failed", "canceled"],
+            "example": "running"
+          },
+          "progress": {
+            "type": "number",
+            "format": "float",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "处理进度百分比",
+            "example": 45.5
+          },
+          "images_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "照片数量",
+            "example": 50
+          },
+          "processing_time": {
+            "type": "integer",
+            "nullable": true,
+            "description": "已处理时间（秒）",
+            "example": 360
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "description": "错误信息（失败时）",
+            "example": "摄影测量重建失败"
+          }
+        }
+      },
+      "TaskSummary": {
+        "type": "object",
+        "required": ["task_id", "status", "progress", "images_count", "created_at"],
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "任务唯一标识",
+            "example": "550e8400-e29b-41d4-a716-446655440000"
+          },
+          "name": {
+            "type": "string",
+            "description": "任务名称",
+            "example": "航拍-2026-05-27"
+          },
+          "status": {
+            "type": "string",
+            "description": "任务状态",
+            "enum": ["queued", "running", "completed", "failed", "canceled"],
+            "example": "completed"
+          },
+          "progress": {
+            "type": "number",
+            "format": "float",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "处理进度百分比，已完成任务始终为 100",
+            "example": 100.0
+          },
+          "images_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "照片数量",
+            "example": 36
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "任务创建时间（ISO 8601）",
+            "example": "2026-05-27T09:20:06.413054+00:00"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "description": "错误信息（失败时）",
+            "example": "相机标定失败"
+          }
+        }
+      },
+      "NodeInfo": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string",
+            "description": "NodeODM 版本",
+            "example": "2.2.0"
+          },
+          "engine": {
+            "type": "string",
+            "description": "ODM 引擎",
+            "example": "ODM"
+          },
+          "engine_version": {
+            "type": "string",
+            "description": "ODM 引擎版本",
+            "example": "4.0.0"
+          },
+          "cpu_cores": {
+            "type": "integer",
+            "description": "CPU 核心数",
+            "example": 16
+          },
+          "total_memory_gb": {
+            "type": "number",
+            "format": "float",
+            "description": "总内存（GB）",
+            "example": 32.0
+          },
+          "available_memory_gb": {
+            "type": "number",
+            "format": "float",
+            "description": "可用内存（GB）",
+            "example": 12.5
+          },
+          "task_queue_count": {
+            "type": "integer",
+            "description": "当前队列中的任务数",
+            "example": 2
+          },
+          "max_parallel_tasks": {
+            "type": "integer",
+            "description": "最大并行任务数",
+            "example": 1
+          }
+        }
+      },
+      "OdmOption": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "选项名称",
+            "example": "orthophoto-resolution"
+          },
+          "type": {
+            "type": "string",
+            "description": "值类型",
+            "example": "int"
+          },
+          "default": {
+            "description": "默认值",
+            "example": 5
+          },
+          "help": {
+            "type": "string",
+            "description": "选项说明",
+            "example": "正射影像分辨率（cm/像素）"
+          },
+          "domain": {
+            "type": "string",
+            "description": "取值范围描述",
+            "example": "[1, 100]"
+          }
+        }
+      },
+      "HealthCheck": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "服务状态",
+            "example": "healthy"
+          },
+          "version": {
+            "type": "string",
+            "description": "服务版本",
+            "example": "1.0.0"
+          },
+          "nodeodm_connected": {
+            "type": "boolean",
+            "description": "NodeODM 连接状态",
+            "example": true
+          },
+          "nodeodm_version": {
+            "type": "string",
+            "description": "NodeODM 版本（仅连接时）",
+            "example": "2.2.0"
+          },
+          "nodeodm_engine_version": {
+            "type": "string",
+            "description": "ODM 引擎版本（仅连接时）",
+            "example": "4.0.0"
+          },
+          "nodeodm_cpu_cores": {
+            "type": "integer",
+            "description": "CPU 核心数（仅连接时）",
+            "example": 16
+          },
+          "nodeodm_task_queue_count": {
+            "type": "integer",
+            "description": "任务队列数（仅连接时）",
+            "example": 2
+          },
+          "error": {
+            "type": "string",
+            "description": "错误信息（无法连接时）",
+            "example": "Connection refused"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "错误描述",
+            "example": "任务不存在"
+          }
+        }
+      }
+    }
+  }
+}

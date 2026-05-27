@@ -12,6 +12,17 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 TASK_TTL_HOURS = int(os.getenv("TASK_TTL_HOURS", "24"))
 CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", "3600"))
 
+MQTT_HOST = os.getenv("MQTT_HOST", "")
+MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
+MQTT_USERNAME = os.getenv("MQTT_USERNAME", "")
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
+MQTT_TOPIC_PREFIX = os.getenv("MQTT_TOPIC_PREFIX", "odm")
+
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "http://odm-middleware:8000").rstrip("/")
+
+MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "500"))
+MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
 DEFAULT_ODM_OPTIONS = {
     "end-with": "odm_orthophoto",
     "matcher-type": "flann",

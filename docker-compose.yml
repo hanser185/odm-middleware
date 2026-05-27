@@ -1,9 +1,9 @@
 services:
-  # NodeODM 处理服务（仅内部网络访问）
+  # NodeODM 处理服务（对外暴露 3000 方便调试）
   nodeodm:
     image: opendronemap/nodeodm:gpu
-    expose:
-      - "3000"
+    ports:
+      - "3000:3000"
     deploy:
       resources:
         reservations:
@@ -12,6 +12,12 @@ services:
               count: all
               capabilities: [gpu]
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3000/info')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     networks:
       - odm_net
 
@@ -25,9 +31,17 @@ services:
     environment:
       - NODEODM_HOST=nodeodm
       - NODEODM_PORT=3000
+      - WEBHOOK_BASE_URL=http://odm-middleware:8000
+      - MQTT_HOST=${MQTT_HOST}
+      - MQTT_PORT=${MQTT_PORT}
+      - MQTT_USERNAME=${MQTT_USERNAME}
+      - MQTT_PASSWORD=${MQTT_PASSWORD}
+      - MQTT_TOPIC_PREFIX=${MQTT_TOPIC_PREFIX}
+    volumes:
+      - odm_tasks_data:/tmp/odm_tasks
     depends_on:
       nodeodm:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -37,6 +51,9 @@ services:
       start_period: 10s
     networks:
       - odm_net
+
+volumes:
+  odm_tasks_data:
 
 networks:
   odm_net:

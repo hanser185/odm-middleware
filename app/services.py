@@ -14,7 +14,8 @@ import paho.mqtt.client as mqtt
 
 from .config import (
     NODEODM_HOST, NODEODM_PORT, NODEODM_TOKEN,
-    TEMP_DIR, TASK_TTL_HOURS, CLEANUP_INTERVAL,
+    TEMP_DIR, TASK_TTL_HOURS, TILE_TASK_TTL_HOURS, CLEANUP_INTERVAL,
+    TILE_UPLOAD_DIR, TILE_OUTPUT_DIR, TILE_TASKS_DIR,
     MQTT_HOST, MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD, MQTT_TOPIC_PREFIX,
 )
 
@@ -29,6 +30,7 @@ _mqtt_lock = threading.Lock()
 
 _task_info_locks = {}
 _task_info_locks_lock = threading.Lock()
+_TILE_TERMINAL_STATUSES = {"completed", "failed"}
 
 
 def get_mqtt_client() -> mqtt.Client:
@@ -150,6 +152,39 @@ def update_task_info_status(task_dir: Path, status: str, error: str = None) -> N
             json.dump(task_info, f, ensure_ascii=False, indent=2)
 
 
+def update_process_and_tile_info(task_dir: Path, tile_config: dict) -> None:
+    task_info_path = task_dir / "task_info.json"
+    with _get_task_lock(task_dir):
+        task_info = _read_task_info_inner(task_info_path)
+        task_info["workflow"] = "process_and_tile"
+        task_info["tile_config"] = tile_config
+        task_info["tile_status"] = "waiting_for_orthophoto"
+        with open(task_info_path, "w", encoding="utf-8") as f:
+            json.dump(task_info, f, ensure_ascii=False, indent=2)
+
+
+def update_process_and_tile_started(task_dir: Path, tile_task_id: str, orthophoto_path: str) -> None:
+    task_info_path = task_dir / "task_info.json"
+    with _get_task_lock(task_dir):
+        task_info = _read_task_info_inner(task_info_path)
+        task_info["tile_task_id"] = tile_task_id
+        task_info["orthophoto_path"] = orthophoto_path
+        task_info["tile_status"] = "processing"
+        task_info.pop("tile_error", None)
+        with open(task_info_path, "w", encoding="utf-8") as f:
+            json.dump(task_info, f, ensure_ascii=False, indent=2)
+
+
+def update_process_and_tile_failed(task_dir: Path, error: str) -> None:
+    task_info_path = task_dir / "task_info.json"
+    with _get_task_lock(task_dir):
+        task_info = _read_task_info_inner(task_info_path)
+        task_info["tile_status"] = "failed"
+        task_info["tile_error"] = error
+        with open(task_info_path, "w", encoding="utf-8") as f:
+            json.dump(task_info, f, ensure_ascii=False, indent=2)
+
+
 def read_task_info(task_dir: Path) -> dict:
     task_info_path = task_dir / "task_info.json"
     with _get_task_lock(task_dir):
@@ -242,10 +277,120 @@ def _cleanup_expired_tasks(temp_dir: Path, max_age_hours: float) -> None:
             cleanup_task_dir(item)
 
 
+def _parse_task_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _task_file_timestamp(task_file: Path, task_info: dict) -> datetime:
+    timestamp = _parse_task_timestamp(task_info.get("finished_at"))
+    if timestamp is None:
+        timestamp = _parse_task_timestamp(task_info.get("updated_at"))
+    if timestamp is None:
+        timestamp = _parse_task_timestamp(task_info.get("created_at"))
+    if timestamp is not None:
+        return timestamp
+    return datetime.fromtimestamp(task_file.stat().st_mtime, timezone.utc)
+
+
+def _safe_remove_child(parent: Path, child_name: str) -> None:
+    if not child_name:
+        return
+    parent = parent.resolve()
+    target = (parent / child_name).resolve()
+    if target == parent or parent not in target.parents:
+        logger.warning("跳过不安全的清理路径: %s", target)
+        return
+    if target.is_dir():
+        shutil.rmtree(target)
+    elif target.exists():
+        target.unlink()
+
+
+def _tile_related_task_ids(task_id: str, task_info: dict) -> set[str]:
+    task_ids = {task_id}
+    if task_info.get("task_type") != "tiles_pair":
+        return task_ids
+    children = task_info.get("children")
+    if isinstance(children, dict):
+        for child in children.values():
+            if isinstance(child, dict) and child.get("task_id"):
+                task_ids.add(str(child["task_id"]))
+    task_ids.add(f"{task_id}-a")
+    task_ids.add(f"{task_id}-b")
+    return task_ids
+
+
+def _remove_tile_task_files(upload_dir: Path, output_dir: Path, tasks_dir: Path, task_ids: set[str]) -> None:
+    for task_id in task_ids:
+        _safe_remove_child(upload_dir, task_id)
+        _safe_remove_child(output_dir, task_id)
+        _safe_remove_child(tasks_dir, f"{task_id}.json")
+    try:
+        from . import tile_tasks
+        with tile_tasks.task_lock:
+            for task_id in task_ids:
+                tile_tasks.task_store.pop(task_id, None)
+    except Exception:
+        logger.debug("清理 tile 内存任务缓存失败", exc_info=True)
+
+
+def _cleanup_orphan_tile_dirs(base_dir: Path, active_task_ids: set[str], max_age_hours: float, now: datetime) -> None:
+    if not base_dir.exists():
+        return
+    for item in base_dir.iterdir():
+        if item.name in active_task_ids:
+            continue
+        if not item.is_dir():
+            continue
+        age_hours = (now - datetime.fromtimestamp(item.stat().st_mtime, timezone.utc)).total_seconds() / 3600
+        if age_hours > max_age_hours:
+            cleanup_task_dir(item)
+
+
+def _cleanup_expired_tile_tasks(upload_dir: Path, output_dir: Path, tasks_dir: Path, max_age_hours: float) -> None:
+    """清理超过 TTL 的终态切割任务产物，保留运行中任务和项目索引。"""
+    if not tasks_dir.exists():
+        return
+    now = datetime.now(timezone.utc)
+    active_task_ids: set[str] = set()
+    for task_file in list(tasks_dir.glob("*.json")):
+        if not task_file.exists():
+            continue
+        task_id = task_file.stem
+        try:
+            task_info = json.loads(task_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            age_hours = (now - datetime.fromtimestamp(task_file.stat().st_mtime, timezone.utc)).total_seconds() / 3600
+            if age_hours > max_age_hours:
+                task_file.unlink(missing_ok=True)
+            continue
+        if task_info.get("status") not in _TILE_TERMINAL_STATUSES:
+            active_task_ids.update(_tile_related_task_ids(task_id, task_info))
+            continue
+        task_time = _task_file_timestamp(task_file, task_info)
+        age_hours = (now - task_time).total_seconds() / 3600
+        if age_hours <= max_age_hours:
+            active_task_ids.update(_tile_related_task_ids(task_id, task_info))
+            continue
+        _remove_tile_task_files(upload_dir, output_dir, tasks_dir, _tile_related_task_ids(task_id, task_info))
+
+    _cleanup_orphan_tile_dirs(upload_dir, active_task_ids, max_age_hours, now)
+    _cleanup_orphan_tile_dirs(output_dir, active_task_ids, max_age_hours, now)
+
+
 async def _cleanup_loop():
     while True:
         await asyncio.sleep(CLEANUP_INTERVAL)
         try:
             _cleanup_expired_tasks(TEMP_DIR, TASK_TTL_HOURS)
+            _cleanup_expired_tile_tasks(TILE_UPLOAD_DIR, TILE_OUTPUT_DIR, TILE_TASKS_DIR, TILE_TASK_TTL_HOURS)
         except Exception as e:
             logger.error("后台清理任务异常: %s", e)

@@ -10,7 +10,14 @@ TEMP_DIR = Path(tempfile.gettempdir()) / "odm_tasks"
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 TASK_TTL_HOURS = int(os.getenv("TASK_TTL_HOURS", "24"))
+TILE_TASK_TTL_HOURS = int(os.getenv("TILE_TASK_TTL_HOURS", str(TASK_TTL_HOURS)))
 CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", "3600"))
+
+TILE_UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "data/uploads"))
+TILE_OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "data/outputs"))
+TILE_TASKS_DIR = Path(os.getenv("TASKS_DIR", "data/tasks"))
+for directory in (TILE_UPLOAD_DIR, TILE_OUTPUT_DIR, TILE_TASKS_DIR):
+    directory.mkdir(parents=True, exist_ok=True)
 
 MQTT_HOST = os.getenv("MQTT_HOST", "")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))

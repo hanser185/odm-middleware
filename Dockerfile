@@ -5,6 +5,11 @@ ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
 WORKDIR /app
 
+# 安装 GDAL 命令行工具（切片流程依赖 gdalinfo/gdalwarp/gdal_translate/gdaltransform）
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gdal-bin && \
+    rm -rf /var/lib/apt/lists/*
+
 # 安装依赖和测试工具
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt pytest -i $PIP_INDEX_URL
@@ -25,14 +30,19 @@ WORKDIR /app
 
 RUN addgroup --system appgroup && adduser --system --no-create-home --ingroup appgroup appuser
 
+# 安装 GDAL 命令行工具（切片流程依赖 gdalinfo/gdalwarp/gdal_translate/gdaltransform）
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gdal-bin && \
+    rm -rf /var/lib/apt/lists/*
+
 # 安装依赖
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt -i $PIP_INDEX_URL
 
 # 复制应用代码并准备运行目录
 COPY app ./app
-RUN mkdir -p /tmp/odm_tasks && \
-    chown appuser:appgroup /tmp/odm_tasks /app
+RUN mkdir -p /tmp/odm_tasks /app/data/uploads /app/data/outputs /app/data/tasks /app/data/projects && \
+    chown -R appuser:appgroup /tmp/odm_tasks /app
 
 # 健康检查（每 30 秒请求 /health）
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

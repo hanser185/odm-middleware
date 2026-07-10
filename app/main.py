@@ -14,6 +14,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from .services import get_node_client, _cleanup_loop, get_mqtt_client
 from .routes import router
+from .tile_routes import tile_router
 from .config import MQTT_HOST, MQTT_PORT
 
 request_id_var: ContextVar[str] = ContextVar("request_id", default="")
@@ -73,6 +74,7 @@ app = FastAPI(
 )
 
 app.include_router(router)
+app.include_router(tile_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

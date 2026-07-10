@@ -1,0 +1,425 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "ODM 自动正射图切片接口",
+    "description": "新增的一体化接口：上传无人机照片，生成正射图后自动切片。",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8000",
+      "description": "本地服务"
+    }
+  ],
+  "tags": [
+    {
+      "name": "自动正射图切片",
+      "description": "无人机照片 -> 正射图 -> 自动切片"
+    }
+  ],
+  "paths": {
+    "/api/v1/process-and-tile": {
+      "post": {
+        "tags": ["自动正射图切片"],
+        "summary": "上传无人机照片并自动生成切片",
+        "description": "创建一体化任务：上传多张无人机照片，NodeODM 生成正射图后，服务自动提取 GeoTIFF 并切片。接口会立即返回 task_id，前端通过状态接口轮询。",
+        "operationId": "processAndTile",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["files"],
+                "properties": {
+                  "files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "binary"
+                    },
+                    "description": "无人机照片文件列表，支持 JPEG/PNG/TIFF"
+                  },
+                  "options": {
+                    "type": "string",
+                    "default": "{}",
+                    "description": "ODM 处理选项 JSON 字符串"
+                  },
+                  "name": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "任务名称，不传则自动生成"
+                  },
+                  "tile_size": {
+                    "type": "integer",
+                    "default": 1024,
+                    "minimum": 1,
+                    "description": "切片输出像素尺寸"
+                  },
+                  "skip_empty_tiles": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "是否跳过空切片"
+                  },
+                  "export_png": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "是否额外导出 PNG 预览图"
+                  },
+                  "grid_origin_x": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "可选网格原点 X"
+                  },
+                  "grid_origin_y": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "可选网格原点 Y"
+                  },
+                  "grid_pixel_size_x": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "可选网格像素宽度"
+                  },
+                  "grid_pixel_size_y": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "可选网格像素高度"
+                  },
+                  "aoi_geojson": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "可选 AOI GeoJSON Polygon 或 MultiPolygon 字符串"
+                  },
+                  "aoi_crs": {
+                    "type": "string",
+                    "nullable": true,
+                    "example": "EPSG:4326",
+                    "description": "AOI 坐标系"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "任务创建成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcessAndTileCreateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数错误"
+          },
+          "413": {
+            "description": "文件大小超过限制"
+          },
+          "503": {
+            "description": "NodeODM 服务不可用"
+          }
+        }
+      }
+    },
+    "/api/v1/process-and-tile/{task_id}/status": {
+      "get": {
+        "tags": ["自动正射图切片"],
+        "summary": "查询一体化任务状态",
+        "operationId": "getProcessAndTileStatus",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "任务 ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "任务状态",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcessAndTileStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "不是自动切片任务"
+          },
+          "404": {
+            "description": "任务不存在"
+          }
+        }
+      }
+    },
+    "/api/v1/process-and-tile/{task_id}/download/orthophoto": {
+      "get": {
+        "tags": ["自动正射图切片"],
+        "summary": "下载自动生成的正射图",
+        "operationId": "downloadProcessAndTileOrthophoto",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "GeoTIFF 文件",
+            "content": {
+              "image/tiff": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "文件不存在"
+          }
+        }
+      }
+    },
+    "/api/v1/process-and-tile/{task_id}/download/tiles": {
+      "get": {
+        "tags": ["自动正射图切片"],
+        "summary": "下载自动切片 ZIP",
+        "operationId": "downloadProcessAndTileTiles",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "tiles.zip 文件",
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "切片任务尚未完成"
+          },
+          "404": {
+            "description": "文件不存在"
+          }
+        }
+      }
+    },
+    "/api/v1/process-and-tile/{task_id}/download/manifest": {
+      "get": {
+        "tags": ["自动正射图切片"],
+        "summary": "下载自动切片 manifest",
+        "operationId": "downloadProcessAndTileManifest",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "manifest.json 文件",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "切片任务尚未完成"
+          },
+          "404": {
+            "description": "文件不存在"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "TileConfig": {
+        "type": "object",
+        "properties": {
+          "tile_size": {
+            "type": "integer",
+            "example": 1024
+          },
+          "tile_width_m": {
+            "type": "number",
+            "example": 120.0
+          },
+          "tile_height_m": {
+            "type": "number",
+            "example": 90.0
+          },
+          "skip_empty_tiles": {
+            "type": "boolean",
+            "example": true
+          },
+          "export_png": {
+            "type": "boolean",
+            "example": true
+          },
+          "grid_origin_x": {
+            "type": "number",
+            "nullable": true
+          },
+          "grid_origin_y": {
+            "type": "number",
+            "nullable": true
+          },
+          "grid_pixel_size_x": {
+            "type": "number",
+            "nullable": true
+          },
+          "grid_pixel_size_y": {
+            "type": "number",
+            "nullable": true
+          },
+          "aoi_geojson": {
+            "type": "object",
+            "nullable": true
+          },
+          "aoi_crs": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "ProcessAndTileCreateResponse": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "example": "queued"
+          },
+          "workflow": {
+            "type": "string",
+            "example": "process_and_tile"
+          },
+          "message": {
+            "type": "string",
+            "example": "任务已创建，共 3 张照片，完成后将自动切片"
+          },
+          "tile_config": {
+            "$ref": "#/components/schemas/TileConfig"
+          }
+        }
+      },
+      "ProcessAndTileStatus": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "description": "整体状态：queued/running/tiling/completed/failed/canceled",
+            "example": "tiling"
+          },
+          "workflow": {
+            "type": "string",
+            "example": "process_and_tile"
+          },
+          "odm_status": {
+            "type": "string",
+            "example": "completed"
+          },
+          "tile_status": {
+            "type": "string",
+            "example": "processing"
+          },
+          "tile_task_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "images_count": {
+            "type": "integer",
+            "example": 36
+          },
+          "tile_progress": {
+            "type": "number",
+            "nullable": true,
+            "example": 60
+          },
+          "generated_tiles": {
+            "type": "integer",
+            "nullable": true
+          },
+          "skipped_empty_tiles": {
+            "type": "integer",
+            "nullable": true
+          },
+          "grid": {
+            "type": "object",
+            "nullable": true
+          },
+          "tiles_oss_url": {
+            "type": "string",
+            "nullable": true
+          },
+          "error": {
+            "type": "string",
+            "nullable": true
+          },
+          "tile_error": {
+            "type": "string",
+            "nullable": true
+          },
+          "orthophoto_download_url": {
+            "type": "string",
+            "example": "/api/v1/process-and-tile/{task_id}/download/orthophoto"
+          },
+          "tiles_download_url": {
+            "type": "string",
+            "example": "/api/v1/process-and-tile/{task_id}/download/tiles"
+          },
+          "manifest_download_url": {
+            "type": "string",
+            "example": "/api/v1/process-and-tile/{task_id}/download/manifest"
+          }
+        }
+      }
+    }
+  }
+}

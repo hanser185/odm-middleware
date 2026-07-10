@@ -2,7 +2,7 @@ import io
 import json
 import sys
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -17,6 +17,7 @@ from app import main
 from app import config
 from app import services
 from app import routes
+from app import tile_tasks
 
 
 def test_runtime_dockerfile_copies_app_code():
@@ -25,6 +26,7 @@ def test_runtime_dockerfile_copies_app_code():
     runtime_stage = content.split("# ===================== 运行时阶段 =====================", 1)[1]
 
     assert "COPY app" in runtime_stage
+    assert "gdal-bin" in content
 
 
 def test_requirements_include_httpx():
@@ -32,6 +34,7 @@ def test_requirements_include_httpx():
     lines = requirements.read_text(encoding="utf-8").splitlines()
 
     assert any(line.startswith("httpx==") for line in lines)
+    assert any(line.startswith("oss2==") for line in lines)
 
 
 def test_process_images_cleans_task_dir_when_nodeodm_create_fails(tmp_path, monkeypatch):
@@ -204,6 +207,52 @@ def test_cleanup_expired_skips_running_task(tmp_path):
     services._cleanup_expired_tasks(tmp_path, max_age_hours=24)
 
     assert running_dir.exists()
+
+
+def test_cleanup_expired_tile_tasks_removes_terminal_task_files(tmp_path, monkeypatch):
+    uploads_dir = tmp_path / "uploads"
+    outputs_dir = tmp_path / "outputs"
+    tasks_dir = tmp_path / "tasks"
+    for directory in (uploads_dir, outputs_dir, tasks_dir):
+        directory.mkdir()
+    task_id = "tile-task-1"
+    created_at = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+    (uploads_dir / task_id).mkdir()
+    (uploads_dir / task_id / "orthophoto.tif").write_text("upload", encoding="utf-8")
+    (outputs_dir / task_id).mkdir()
+    (outputs_dir / task_id / "tiles.zip").write_text("zip", encoding="utf-8")
+    (tasks_dir / f"{task_id}.json").write_text(
+        json.dumps({"status": "completed", "created_at": created_at}),
+        encoding="utf-8",
+    )
+
+    services._cleanup_expired_tile_tasks(uploads_dir, outputs_dir, tasks_dir, max_age_hours=24)
+
+    assert not (uploads_dir / task_id).exists()
+    assert not (outputs_dir / task_id).exists()
+    assert not (tasks_dir / f"{task_id}.json").exists()
+
+
+def test_cleanup_expired_tile_tasks_keeps_running_task_files(tmp_path):
+    uploads_dir = tmp_path / "uploads"
+    outputs_dir = tmp_path / "outputs"
+    tasks_dir = tmp_path / "tasks"
+    for directory in (uploads_dir, outputs_dir, tasks_dir):
+        directory.mkdir()
+    task_id = "tile-task-running"
+    created_at = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+    (uploads_dir / task_id).mkdir()
+    (outputs_dir / task_id).mkdir()
+    (tasks_dir / f"{task_id}.json").write_text(
+        json.dumps({"status": "processing", "created_at": created_at}),
+        encoding="utf-8",
+    )
+
+    services._cleanup_expired_tile_tasks(uploads_dir, outputs_dir, tasks_dir, max_age_hours=24)
+
+    assert (uploads_dir / task_id).exists()
+    assert (outputs_dir / task_id).exists()
+    assert (tasks_dir / f"{task_id}.json").exists()
 
 
 def test_update_task_info_status_updates_file(tmp_path):
@@ -529,3 +578,349 @@ def test_process_images_passes_webhook_to_nodeodm(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert "webhook" in call_kwargs
     assert call_kwargs["webhook"] == "http://test-server:8000/api/v1/webhook/" + response.json()["task_id"]
+
+
+def test_process_and_tile_creates_odm_task_with_tile_metadata(tmp_path, monkeypatch):
+    class SuccessfulTask:
+        uuid = "node-task-uuid"
+
+    class RecordingNodeClient:
+        def create_task(self, **kwargs):
+            created.update(kwargs)
+            return SuccessfulTask()
+
+    created = {}
+    monkeypatch.setattr(routes, "TEMP_DIR", tmp_path)
+    monkeypatch.setattr(routes, "get_node_client", lambda: RecordingNodeClient())
+
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/v1/process-and-tile",
+        files={"files": ("image.jpg", b"fake image bytes", "image/jpeg")},
+        data={
+            "options": "{}",
+            "tile_size": "512",
+            "skip_empty_tiles": "true",
+            "export_png": "false",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    task_dir = tmp_path / data["task_id"]
+    task_info = json.loads((task_dir / "task_info.json").read_text(encoding="utf-8"))
+    assert data["status"] == "queued"
+    assert data["workflow"] == "process_and_tile"
+    assert task_info["workflow"] == "process_and_tile"
+    assert task_info["tile_status"] == "waiting_for_orthophoto"
+    assert task_info["tile_config"]["tile_size"] == 512
+    assert task_info["tile_config"]["export_png"] is False
+    assert created["webhook"].endswith(f"/api/v1/webhook/{data['task_id']}")
+
+
+def test_webhook_starts_tile_task_after_combined_odm_completion(tmp_path, monkeypatch):
+    class FakeNodeClient:
+        def get_task(self, uuid):
+            class FakeInfo:
+                status = type("Status", (), {"name": "COMPLETED"})()
+                progress = 100.0
+                images_count = 3
+                processing_time = 60000
+                last_error = ""
+
+            class FakeTask:
+                def info(self):
+                    return FakeInfo()
+
+            return FakeTask()
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("odm_orthophoto/odm_orthophoto.tif", b"combined-tif")
+    zip_bytes = zip_buffer.getvalue()
+
+    class FakeResponse:
+        status_code = 200
+        content = zip_bytes
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            requested_urls.append(url)
+            return FakeResponse()
+
+    requested_urls = []
+    started_tiles = []
+    monkeypatch.setattr(routes, "TEMP_DIR", tmp_path)
+    monkeypatch.setattr(routes, "get_node_client", lambda: FakeNodeClient())
+    monkeypatch.setattr(routes, "publish_task_status", lambda **kw: None)
+    monkeypatch.setattr(routes.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(
+        routes,
+        "create_tiles_task",
+        lambda orthophoto_path, output_dir, tile_config, task_id=None: started_tiles.append(
+            {
+                "orthophoto_path": orthophoto_path,
+                "output_dir": output_dir,
+                "tile_config": tile_config,
+                "task_id": task_id,
+            }
+        ) or "tile-task-id",
+    )
+
+    task_id = "00000000-0000-0000-0000-000000000008"
+    task_dir = tmp_path / task_id
+    task_dir.mkdir()
+    services.write_task_info(task_dir, "node-task-uuid", "test", 3)
+    services.update_process_and_tile_info(
+        task_dir,
+        {
+            "tile_size": 512,
+            "tile_width_m": 120.0,
+            "tile_height_m": 90.0,
+            "skip_empty_tiles": True,
+            "export_png": True,
+            "grid_origin_x": None,
+            "grid_origin_y": None,
+            "grid_pixel_size_x": None,
+            "grid_pixel_size_y": None,
+            "aoi_geojson": None,
+            "aoi_crs": None,
+        },
+    )
+
+    client = TestClient(main.app)
+    response = client.post(f"/api/v1/webhook/{task_id}")
+
+    assert response.status_code == 200
+    assert requested_urls[0].endswith("/task/node-task-uuid/download/all.zip")
+    assert len(started_tiles) == 1
+    assert Path(started_tiles[0]["orthophoto_path"]).read_bytes() == b"combined-tif"
+    task_info = json.loads((task_dir / "task_info.json").read_text(encoding="utf-8"))
+    assert task_info["tile_task_id"] == "tile-task-id"
+    assert task_info["tile_status"] == "processing"
+    assert task_info["orthophoto_path"].endswith("orthophoto.tif")
+
+
+def test_process_and_tile_status_includes_tile_task_state(tmp_path, monkeypatch):
+    task_id = "00000000-0000-0000-0000-000000000009"
+    task_dir = tmp_path / task_id
+    task_dir.mkdir()
+    services.write_task_info(task_dir, "node-task-uuid", "test", 3)
+    services.update_process_and_tile_info(task_dir, {"tile_size": 512})
+    services.update_process_and_tile_started(task_dir, "tile-task-id", str(task_dir / "orthophoto.tif"))
+    services.update_task_info_status(task_dir, "completed")
+
+    monkeypatch.setattr(routes, "TEMP_DIR", tmp_path)
+    monkeypatch.setattr(
+        routes,
+        "get_tile_task",
+        lambda tile_task_id: {
+            "status": "completed",
+            "progress": 100,
+            "tiles_zip_path": str(task_dir / "tiles.zip"),
+            "manifest_path": str(task_dir / "manifest.json"),
+        },
+    )
+
+    client = TestClient(main.app)
+    response = client.get(f"/api/v1/process-and-tile/{task_id}/status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["task_id"] == task_id
+    assert data["status"] == "completed"
+    assert data["odm_status"] == "completed"
+    assert data["tile_status"] == "completed"
+    assert data["tile_task_id"] == "tile-task-id"
+    assert data["tiles_download_url"] == f"/api/v1/process-and-tile/{task_id}/download/tiles"
+
+
+
+
+def test_process_pair_and_tile_creates_two_odm_tasks_with_local_pair_workflow(tmp_path, monkeypatch):
+    class SuccessfulTask:
+        def __init__(self, uuid):
+            self.uuid = uuid
+
+    class RecordingNodeClient:
+        def create_task(self, **kwargs):
+            created.append(kwargs)
+            return SuccessfulTask(f"node-task-{len(created)}")
+
+    created = []
+    monkeypatch.setattr(routes, "TEMP_DIR", tmp_path)
+    monkeypatch.setattr(routes, "get_node_client", lambda: RecordingNodeClient())
+    monkeypatch.setattr(routes, "WEBHOOK_BASE_URL", "http://test-server:8000")
+
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/v1/process-pair-and-tile",
+        files=[
+            ("base_files", ("base1.jpg", b"base-one", "image/jpeg")),
+            ("base_files", ("base2.jpg", b"base-two", "image/jpeg")),
+            ("compare_files", ("compare1.jpg", b"compare-one", "image/jpeg")),
+        ],
+        data={
+            "options": "{}",
+            "tile_size": "512",
+            "skip_empty_tiles": "true",
+            "export_png": "false",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "queued"
+    assert data["workflow"] == "process_pair_and_tile"
+    assert "tile_config" not in data
+    assert len(created) == 2
+    assert [Path(file).name for file in created[0]["files"]] == ["base1.jpg", "base2.jpg"]
+    assert [Path(file).name for file in created[1]["files"]] == ["compare1.jpg"]
+    assert created[0]["webhook"] == f"http://test-server:8000/api/v1/process-pair-and-tile/{data['task_id']}/webhook/base"
+    assert created[1]["webhook"] == f"http://test-server:8000/api/v1/process-pair-and-tile/{data['task_id']}/webhook/compare"
+
+    task_info = json.loads((tmp_path / data["task_id"] / "task_info.json").read_text(encoding="utf-8"))
+    assert task_info["workflow"] == "process_pair_and_tile"
+    assert task_info["base"]["node_task_uuid"] == "node-task-1"
+    assert task_info["compare"]["node_task_uuid"] == "node-task-2"
+    assert task_info["base"]["status"] == "queued"
+    assert task_info["compare"]["status"] == "queued"
+    assert task_info["tile_status"] == "waiting_for_orthophotos"
+    assert task_info["tile_config"]["tile_size"] == 512
+    assert task_info["tile_config"]["export_png"] is False
+
+
+def test_pair_webhook_starts_local_pair_tiling_after_both_odm_tasks_complete(tmp_path, monkeypatch):
+    class FakeNodeClient:
+        def get_task(self, uuid):
+            class FakeInfo:
+                status = type("Status", (), {"name": "COMPLETED"})()
+                progress = 100.0
+                images_count = 2
+                processing_time = 60000
+                last_error = ""
+
+            class FakeTask:
+                def info(self):
+                    return FakeInfo()
+
+            return FakeTask()
+
+    def zip_with_tif(content: bytes):
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("odm_orthophoto/odm_orthophoto.tif", content)
+        return zip_buffer.getvalue()
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, content):
+            self.content = content
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            requested_urls.append(url)
+            if "base-node-uuid" in url:
+                return FakeResponse(zip_with_tif(b"base-tif"))
+            return FakeResponse(zip_with_tif(b"compare-tif"))
+
+    requested_urls = []
+    started_pairs = []
+    monkeypatch.setattr(routes, "TEMP_DIR", tmp_path)
+    monkeypatch.setattr(routes, "get_node_client", lambda: FakeNodeClient())
+    monkeypatch.setattr(routes.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(
+        routes,
+        "create_tiles_pair_task",
+        lambda image_a_path, image_b_path, output_dir, tile_config, task_id=None: started_pairs.append(
+            {
+                "image_a_path": image_a_path,
+                "image_b_path": image_b_path,
+                "output_dir": output_dir,
+                "tile_config": tile_config,
+                "task_id": task_id,
+            }
+        ) or "pair-tile-task-id",
+    )
+
+    task_id = "00000000-0000-0000-0000-000000000010"
+    task_dir = tmp_path / task_id
+    task_dir.mkdir()
+    task_info = {
+        "workflow": "process_pair_and_tile",
+        "created_at": "2026-07-08T00:00:00+00:00",
+        "name": "pair-task",
+        "base": {"node_task_uuid": "base-node-uuid", "status": "queued", "files_count": 2},
+        "compare": {"node_task_uuid": "compare-node-uuid", "status": "queued", "files_count": 1},
+        "tile_status": "waiting_for_orthophotos",
+        "tile_config": {
+            "tile_size": 512,
+            "tile_width_m": 120.0,
+            "tile_height_m": 90.0,
+            "skip_empty_tiles": True,
+            "export_png": True,
+            "grid_origin_x": None,
+            "grid_origin_y": None,
+            "grid_pixel_size_x": None,
+            "grid_pixel_size_y": None,
+            "aoi_geojson": None,
+            "aoi_crs": None,
+        },
+    }
+    (task_dir / "task_info.json").write_text(json.dumps(task_info), encoding="utf-8")
+
+    client = TestClient(main.app)
+    first = client.post(f"/api/v1/process-pair-and-tile/{task_id}/webhook/base")
+    second = client.post(f"/api/v1/process-pair-and-tile/{task_id}/webhook/compare")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(started_pairs) == 1
+    assert Path(started_pairs[0]["image_a_path"]).read_bytes() == b"base-tif"
+    assert Path(started_pairs[0]["image_b_path"]).read_bytes() == b"compare-tif"
+    assert started_pairs[0]["task_id"] == "00000000-0000-0000-0000-000000000010-pair"
+    assert requested_urls[0].endswith("/task/base-node-uuid/download/all.zip")
+    assert requested_urls[1].endswith("/task/compare-node-uuid/download/all.zip")
+
+    updated = json.loads((task_dir / "task_info.json").read_text(encoding="utf-8"))
+    assert updated["base"]["status"] == "completed"
+    assert updated["compare"]["status"] == "completed"
+    assert updated["base"]["orthophoto_path"].endswith("orthophotos/base.tif")
+    assert updated["compare"]["orthophoto_path"].endswith("orthophotos/compare.tif")
+    assert updated["tile_status"] == "processing"
+    assert updated["tile_task_id"] == "pair-tile-task-id"
+
+def test_tile_routes_are_registered():
+    paths = set()
+    for route in main.app.routes:
+        if hasattr(route, "path"):
+            paths.add(route.path)
+        for nested_route in getattr(getattr(route, "original_router", None), "routes", []):
+            if hasattr(nested_route, "path"):
+                paths.add(nested_route.path)
+
+    assert "/api/tiles/process" in paths
+    assert "/api/tiles/process-pair" in paths
+    assert "/api/task/{task_id}/status" in paths
+    assert "/api/task/{task_id}/download/tiles" in paths
+    assert "/api/task/{task_id}/download/manifest" in paths
+    assert "/api/task/{task_id}/download/orthophoto" in paths

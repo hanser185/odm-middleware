@@ -5,3 +5,4 @@ python-multipart==0.0.6
 pydantic==2.5.3
 paho-mqtt==2.1.0
 httpx==0.26.0
+oss2==2.19.1

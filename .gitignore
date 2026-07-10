@@ -11,6 +11,7 @@ images/
 20260424170228*/
 result/
 result_diff.jpg
+data/
 
 # 测试草稿
 odmdemo.py

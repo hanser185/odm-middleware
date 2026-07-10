@@ -89,6 +89,40 @@ curl -X POST "http://localhost:8000/api/v1/process" \
 }
 ```
 
+### 1.1 上传照片、生成正射图并自动切片
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/process-and-tile" \
+  -F "files=@image1.jpg" \
+  -F "files=@image2.jpg" \
+  -F 'options={"orthophoto_resolution": 5.0}' \
+  -F "tile_size=1024" \
+  -F "skip_empty_tiles=true" \
+  -F "export_png=true"
+```
+
+响应：
+```json
+{
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "queued",
+  "workflow": "process_and_tile",
+  "message": "任务已创建，共 2 张照片，完成后将自动切片"
+}
+```
+
+查询一体化任务：
+```bash
+curl "http://localhost:8000/api/v1/process-and-tile/{task_id}/status"
+```
+
+下载自动切片结果：
+```bash
+curl -o tiles.zip "http://localhost:8000/api/v1/process-and-tile/{task_id}/download/tiles"
+curl -o manifest.json "http://localhost:8000/api/v1/process-and-tile/{task_id}/download/manifest"
+curl -o orthophoto.tif "http://localhost:8000/api/v1/process-and-tile/{task_id}/download/orthophoto"
+```
+
 ### 2. 查询任务状态
 
 ```bash
@@ -204,7 +238,8 @@ with open("orthophoto.tif", "wb") as f:
 | MQTT_PASSWORD | MQTT 密码 | (空) |
 | MQTT_TOPIC_PREFIX | MQTT 主题前缀 | odm |
 | MAX_UPLOAD_SIZE_MB | 单文件上传上限（MB） | 500 |
-| TASK_TTL_HOURS | 任务本地目录保留时长（超时自动清理） | 24 |
+| TASK_TTL_HOURS | ODM 临时任务本地目录保留时长（超时自动清理） | 24 |
+| TILE_TASK_TTL_HOURS | 切割任务上传、输出和任务记录保留时长（超时自动清理） | 24 |
 | CLEANUP_INTERVAL | 后台清理检查间隔（秒） | 3600 |
 
 所有环境变量可通过 `.env` 文件或 `docker-compose.yml` 的 `environment` 字段配置。参考 `.env.example`。
@@ -260,8 +295,9 @@ docker-compose exec odm-middleware python -c "import urllib.request; print(urlli
 
 ## 自动清理
 
-已完成或失败的任务本地目录会在 `TASK_TTL_HOURS`（默认 24 小时）后自动删除。
-运行中的任务不会被清理。容器启动后会立即开始后台清理循环。
+已完成或失败的 ODM 临时任务目录会在 `TASK_TTL_HOURS`（默认 24 小时）后自动删除。
+已完成或失败的切割任务会在 `TILE_TASK_TTL_HOURS`（默认 24 小时）后自动删除对应的上传目录、输出目录和 `data/tasks` 任务记录。
+运行中的任务不会被清理，`data/projects` 项目索引不会被自动清理。容器启动后会立即开始后台清理循环。
 
 ## 运行测试
 

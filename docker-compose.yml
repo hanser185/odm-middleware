@@ -37,8 +37,19 @@ services:
       - MQTT_USERNAME=${MQTT_USERNAME}
       - MQTT_PASSWORD=${MQTT_PASSWORD}
       - MQTT_TOPIC_PREFIX=${MQTT_TOPIC_PREFIX}
+      - TASK_TTL_HOURS=${TASK_TTL_HOURS:-24}
+      - TILE_TASK_TTL_HOURS=${TILE_TASK_TTL_HOURS:-24}
+      - CLEANUP_INTERVAL=${CLEANUP_INTERVAL:-3600}
+      - UPLOAD_DIR=/app/data/uploads
+      - OUTPUT_DIR=/app/data/outputs
+      - TASKS_DIR=/app/data/tasks
+      - PROJECTS_DIR=/app/data/projects
     volumes:
       - odm_tasks_data:/tmp/odm_tasks
+      - tile_uploads_data:/app/data/uploads
+      - tile_outputs_data:/app/data/outputs
+      - tile_tasks_data:/app/data/tasks
+      - tile_projects_data:/app/data/projects
     depends_on:
       nodeodm:
         condition: service_healthy
@@ -54,6 +65,10 @@ services:
 
 volumes:
   odm_tasks_data:
+  tile_uploads_data:
+  tile_outputs_data:
+  tile_tasks_data:
+  tile_projects_data:
 
 networks:
   odm_net:

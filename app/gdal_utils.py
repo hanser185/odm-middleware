@@ -1,16 +1,22 @@
 import json
+import logging
 import math
 import os
 import subprocess
 import zipfile
 from pathlib import Path
 
+logger = logging.getLogger("odm")
+
 
 def run_command(cmd: list[str], input_text: str | None = None):
     env = os.environ.copy()
     env["GDAL_PAM_ENABLED"] = "NO"
+    logger.debug("执行命令: %s", " ".join(cmd))
     result = subprocess.run(cmd, input=input_text, capture_output=True, text=True, env=env)
     if result.returncode != 0:
+        logger.error("命令失败 (code %d): %s\nSTDERR: %s\nSTDOUT: %s",
+                     result.returncode, " ".join(cmd), result.stderr, result.stdout)
         raise RuntimeError(
             f"Command failed (code {result.returncode})\nCMD: {' '.join(cmd)}\nSTDERR:\n{result.stderr}\nSTDOUT:\n{result.stdout}"
         )
@@ -119,13 +125,16 @@ def build_aligned_aoi_crop_config(
         float(tile_height_m),
     )
     geo_transform = dataset["geoTransform"]
-    return {
+    result = {
         "bounds": bounds,
         "resolution": {
             "pixel_size_x": abs(float(geo_transform[1])),
             "pixel_size_y": abs(float(geo_transform[5])),
         },
     }
+    logger.info("[build_aligned_aoi_crop_config] 对齐后边界: %s, 分辨率: %s",
+                result["bounds"], result["resolution"])
+    return result
 
 
 def build_tile_coordinates(tiles: list[dict], source_wkt: str | None):
@@ -194,6 +203,8 @@ def crop_orthophoto_to_aoi(
     target_bounds: dict | None = None,
     target_resolution: dict | None = None,
 ):
+    logger.info("[crop_orthophoto_to_aoi] 开始裁剪: %s -> %s, CRS=%s, bounds=%s",
+                input_tif, output_tif, aoi_crs, target_bounds)
     cutline_path = Path(output_tif).with_suffix(".aoi.geojson")
     write_aoi_cutline(aoi_geojson, aoi_crs, cutline_path)
 
@@ -236,6 +247,7 @@ def crop_orthophoto_to_aoi(
         cmd.extend(["-cutline_srs", aoi_crs])
     cmd.extend([input_tif, output_tif])
     run_command(cmd)
+    logger.info("[crop_orthophoto_to_aoi] 裁剪完成: %s", output_tif)
 
     source_info = load_gdal_json(input_tif)
     cropped_info = load_gdal_json(output_tif)
@@ -297,6 +309,7 @@ def split_orthophoto(
     if export_png:
         png_dir.mkdir(parents=True, exist_ok=True)
 
+    logger.info("[split_orthophoto] 读取正射图元数据: %s", input_tif)
     dataset = load_gdal_json(input_tif)
     size = dataset["size"]
     width, height = int(size[0]), int(size[1])
@@ -308,6 +321,8 @@ def split_orthophoto(
     max_x = float(source_bounds["upperRight"][0])
     min_y = float(source_bounds["lowerLeft"][1])
     max_y = float(source_bounds["upperRight"][1])
+    logger.info("[split_orthophoto] 源图尺寸: %dx%d, 像素分辨率: (%.6f, %.6f), 范围: [%.2f, %.2f] - [%.2f, %.2f]",
+                width, height, abs(pixel_size_x), pixel_size_y_abs, min_x, min_y, max_x, max_y)
 
     grid_pixel_size_x = abs(grid_pixel_size_x if grid_pixel_size_x is not None else pixel_size_x)
     grid_pixel_size_y = abs(grid_pixel_size_y if grid_pixel_size_y is not None else pixel_size_y_abs)
@@ -325,6 +340,12 @@ def split_orthophoto(
     col_end = math.ceil((max_x - grid_origin_x) / tile_span_x) - 1
     row_start = math.floor((grid_origin_y - max_y) / tile_span_y)
     row_end = math.ceil((grid_origin_y - min_y) / tile_span_y) - 1
+
+    total_tiles = (row_end - row_start + 1) * (col_end - col_start + 1)
+    logger.info("[split_orthophoto] 网格: origin=(%.2f, %.2f), span=(%.1f, %.1f)m, "
+                "rows=%d..%d, cols=%d..%d, 预计 %d 个瓦片",
+                grid_origin_x, grid_origin_y, tile_span_x, tile_span_y,
+                row_start, row_end, col_start, col_end, total_tiles)
 
     manifest = {
         "input_file": str(input_tif),
@@ -368,6 +389,7 @@ def split_orthophoto(
         },
     }
 
+    processed = 0
     for row in range(row_start, row_end + 1):
         for col in range(col_start, col_end + 1):
             tile_ulx = grid_origin_x + col * tile_span_x
@@ -409,6 +431,10 @@ def split_orthophoto(
             if skip_empty_tiles and is_empty:
                 tile_tif.unlink(missing_ok=True)
                 manifest["summary"]["skipped_empty_tiles"] += 1
+                processed += 1
+                if processed % 10 == 0:
+                    logger.info("[split_orthophoto] 进度: %d/%d (跳过 %d 空白)",
+                                processed, total_tiles, manifest["summary"]["skipped_empty_tiles"])
                 continue
 
             png_path = None
@@ -432,6 +458,12 @@ def split_orthophoto(
                 }
             )
             manifest["summary"]["generated_tiles"] += 1
+            processed += 1
+            if processed % 10 == 0:
+                logger.info("[split_orthophoto] 进度: %d/%d (已生成 %d, 跳过 %d 空白)",
+                            processed, total_tiles,
+                            manifest["summary"]["generated_tiles"],
+                            manifest["summary"]["skipped_empty_tiles"])
 
     manifest_path = output_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=True, indent=2))
@@ -440,7 +472,10 @@ def split_orthophoto(
         manifest["tiles"],
         manifest["source"].get("crs_wkt"),
     )
-    tile_coordinates_path.write_text(json.dumps(tile_coordinates, ensure_ascii=True, indent=2))
+    tile_coordinates_path.write_text(json.dumps(tile_coordinates, ensure_ascii=False, indent=2))
+    logger.info("[split_orthophoto] 切割完成: 生成 %d 张瓦片, 跳过 %d 张空白",
+                manifest["summary"]["generated_tiles"],
+                manifest["summary"]["skipped_empty_tiles"])
     return {
         "tiles_dir": str(output_path),
         "manifest_path": str(manifest_path),

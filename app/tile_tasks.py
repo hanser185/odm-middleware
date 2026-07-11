@@ -1,12 +1,15 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
 import threading
 import uuid
 import zipfile
+
+logger = logging.getLogger("odm")
 
 from .gdal_utils import build_aligned_aoi_crop_config, crop_orthophoto_to_aoi, split_orthophoto, zip_directory
 from .oss_utils import upload_file_to_oss
@@ -110,6 +113,7 @@ def load_existing_tasks():
 load_existing_tasks()
 
 def run_tiles_task(task_id: str, orthophoto_path: str, output_dir: str, tile_config: dict):
+    logger.info("[%s] 单图切片任务开始, source=%s", task_id, orthophoto_path)
     try:
         task = get_task(task_id)
         task["status"] = "processing"
@@ -146,6 +150,7 @@ def run_tiles_task(task_id: str, orthophoto_path: str, output_dir: str, tile_con
         aoi_geojson = tile_config.get("aoi_geojson")
         if aoi_geojson is not None:
             # 有aoi走gdalwarp裁剪，对正射图进行裁切
+            logger.info("[%s] 开始 AOI 裁剪", task_id)
             crop_summary = crop_orthophoto_to_aoi(
                 str(source_ortho_file),
                 str(ortho_file), # 最终生成的裁剪后正射影像
@@ -154,6 +159,7 @@ def run_tiles_task(task_id: str, orthophoto_path: str, output_dir: str, tile_con
                 tile_config.get("aoi_target_bounds"),
                 tile_config.get("aoi_target_resolution"),
             )
+            logger.info("[%s] AOI 裁剪完成", task_id)
             # 存入 task["aoi"]字典
             task["aoi"] = {
                 "geojson": crop_summary["aoi_geojson"],
@@ -176,6 +182,8 @@ def run_tiles_task(task_id: str, orthophoto_path: str, output_dir: str, tile_con
         # 检测空切片，导出PNG，写manifest.json。返回的摘要写入任务记录：生成数量、跳过数量、网格参数、manifest 路径
         task["progress"] = 60
         persist_task(task_id) # 写入持久化
+        logger.info("[%s] 开始瓦片切割, tile_size=%s, tile_width_m=%s, tile_height_m=%s",
+                    task_id, tile_config["tile_size"], tile_config["tile_width_m"], tile_config["tile_height_m"])
         tile_summary = split_orthophoto(
             str(ortho_file), # 输入的正射影像路径
             str(tiles_dir),  # 输出瓦片目录
@@ -195,17 +203,24 @@ def run_tiles_task(task_id: str, orthophoto_path: str, output_dir: str, tile_con
         task["manifest_path"] = tile_summary["manifest_path"] #生成的文件清单（manifest）路径，记录每个瓦片的文件名、位置等信息
         task["tile_coordinates_path"] = tile_summary["tile_coordinates_path"]
         persist_task(task_id)
+        logger.info("[%s] 瓦片切割完成, generated=%d, skipped_empty=%d, grid=%dx%d",
+                    task_id, tile_summary["generated_tiles"], tile_summary["skipped_empty_tiles"],
+                    tile_summary["grid"]["col_end"] - tile_summary["grid"]["col_start"] + 1,
+                    tile_summary["grid"]["row_end"] - tile_summary["grid"]["row_start"] + 1)
         # 开始打包
         task["progress"] = 85
         persist_task(task_id)
         zip_directory(str(tiles_dir), str(zip_file)) # 将文件压缩成zip
         task["tiles_zip_path"] = str(zip_file)
+        logger.info("[%s] 开始上传 tiles.zip 到 OSS", task_id)
         oss_result = upload_file_to_oss(str(zip_file), f"tiles/{task_id}/tiles.zip")
         task.update(oss_result_fields("tiles", oss_result))
         task["status"] = "completed"
         task["progress"] = 100
         persist_task(task_id)
+        logger.info("[%s] 单图切片任务完成", task_id)
     except Exception as e:
+        logger.error("[%s] 单图切片任务失败: %s", task_id, e, exc_info=True)
         task = get_task(task_id)
         if task is not None:
             task["status"] = "failed"
@@ -336,6 +351,7 @@ def run_tiles_pair_task(
 ):
     image_a_task_id = f"{pair_task_id}-a"
     image_b_task_id = f"{pair_task_id}-b"
+    logger.info("[%s] 成对切片任务开始, image_a=%s, image_b=%s", pair_task_id, image_a_path, image_b_path)
     try:
         update_task(pair_task_id, {"status": "processing", "progress": 1})
         create_task_record(image_a_task_id, {"status": "pending", "progress": 0, "task_type": "tiles"})
@@ -344,6 +360,7 @@ def run_tiles_pair_task(
 
         image_a_config = dict(tile_config)
         if image_a_config.get("aoi_geojson") is not None:
+            logger.info("[%s] 计算 AOI 对齐裁剪参数", pair_task_id)
             crop_config = build_aligned_aoi_crop_config(
                 image_a_path,
                 image_a_config["aoi_geojson"],
@@ -353,20 +370,31 @@ def run_tiles_pair_task(
             )
             image_a_config["aoi_target_bounds"] = crop_config["bounds"]
             image_a_config["aoi_target_resolution"] = crop_config["resolution"]
+            logger.info("[%s] AOI 对齐参数: bounds=%s, resolution=%s",
+                        pair_task_id, crop_config["bounds"], crop_config["resolution"])
 
+        logger.info("[%s] 开始处理 image_a (base)", pair_task_id)
         run_tiles_task(image_a_task_id, image_a_path, output_dir, image_a_config)
         image_a_task = get_task(image_a_task_id)
         if image_a_task is None or image_a_task.get("status") != "completed":
             raise RuntimeError(image_a_task.get("error") if image_a_task else "First image task failed")
+        logger.info("[%s] image_a 处理完成, generated=%d", pair_task_id, image_a_task.get("generated_tiles", 0))
         refresh_pair_children(pair_task_id, image_a_task_id, image_b_task_id)
 
         image_b_config = copy_grid_to_tile_config(image_a_config, image_a_task["grid"])
+        logger.info("[%s] image_b 复用 image_a 网格: origin=(%s, %s), pixel_size=(%s, %s)",
+                    pair_task_id, image_b_config["grid_origin_x"], image_b_config["grid_origin_y"],
+                    image_b_config["grid_pixel_size_x"], image_b_config["grid_pixel_size_y"])
+        logger.info("[%s] 开始处理 image_b (compare)", pair_task_id)
         run_tiles_task(image_b_task_id, image_b_path, output_dir, image_b_config)
         image_b_task = get_task(image_b_task_id)
         if image_b_task is None or image_b_task.get("status") != "completed":
             raise RuntimeError(image_b_task.get("error") if image_b_task else "Second image task failed")
+        logger.info("[%s] image_b 处理完成, generated=%d", pair_task_id, image_b_task.get("generated_tiles", 0))
 
+        logger.info("[%s] 开始打包 tiles_pair.zip", pair_task_id)
         pair_zip_path = build_tiles_pair_zip(pair_task_id, output_dir, image_a_task, image_b_task)
+        logger.info("[%s] 开始上传 tiles_pair.zip 到 OSS", pair_task_id)
         oss_result = upload_file_to_oss(pair_zip_path, f"tiles_pair/{pair_task_id}/tiles_pair.zip")
         oss_fields = oss_result_fields("tiles_pair", oss_result)
         results = {
@@ -398,7 +426,12 @@ def run_tiles_pair_task(
                 "results": results,
             },
         )
+        logger.info("[%s] 成对切片任务完成, a_tiles=%d, b_tiles=%d",
+                    pair_task_id,
+                    image_a_task.get("generated_tiles", 0),
+                    image_b_task.get("generated_tiles", 0))
     except Exception as e:
+        logger.error("[%s] 成对切片任务失败: %s", pair_task_id, e, exc_info=True)
         refresh_pair_children(pair_task_id, image_a_task_id, image_b_task_id)
         update_task(pair_task_id, {"status": "failed", "error": str(e)})
 
@@ -411,6 +444,7 @@ def create_tiles_pair_task(
     task_id: str | None = None,
 ):
     task_id = task_id or str(uuid.uuid4())
+    logger.info("[%s] 创建成对切片任务, tile_size=%s", task_id, tile_config.get("tile_size"))
     create_task_record(
         task_id,
         {

@@ -368,16 +368,20 @@ async def process_pair_and_tile_webhook(task_id: str, phase: str):
         task = client.get_task(task_uuid)
         info = task.info()
         node_status = info.status.name.lower()
+        logger.info("[%s] webhook/%s 到达, NodeODM 状态: %s", task_id, phase, node_status)
         task_info[phase]["status"] = node_status
         if node_status == "failed" and info.last_error:
             task_info[phase]["error"] = info.last_error
             task_info["error"] = info.last_error
+            logger.warning("[%s] webhook/%s ODM 任务失败: %s", task_id, phase, info.last_error)
         elif node_status != "failed":
             task_info[phase].pop("error", None)
         if node_status == "completed" and not task_info[phase].get("orthophoto_path"):
+            logger.info("[%s] webhook/%s 开始提取正射图", task_id, phase)
             output_path = task_dir / "orthophotos" / ("base.tif" if phase == "base" else "compare.tif")
             orthophoto_path = await _extract_orthophoto_from_nodeodm_zip_to_path(task_uuid, output_path)
             task_info[phase]["orthophoto_path"] = str(orthophoto_path)
+            logger.info("[%s] webhook/%s 正射图已提取: %s", task_id, phase, orthophoto_path)
         _write_pair_task_info(task_dir, task_info)
 
         latest_info = _read_pair_task_info(task_dir)
@@ -386,6 +390,10 @@ async def process_pair_and_tile_webhook(task_id: str, phase: str):
             and latest_info.get("compare", {}).get("status") == "completed"
             and not latest_info.get("tile_task_id")
         ):
+            logger.info("[%s] 正射图均已就绪 (base=%s, compare=%s), 启动成对切片任务",
+                        task_id,
+                        latest_info["base"]["orthophoto_path"],
+                        latest_info["compare"]["orthophoto_path"])
             tile_task_id = create_tiles_pair_task(
                 latest_info["base"]["orthophoto_path"],
                 latest_info["compare"]["orthophoto_path"],
@@ -393,6 +401,7 @@ async def process_pair_and_tile_webhook(task_id: str, phase: str):
                 latest_info.get("tile_config") or build_tile_config(1024, True, True, None, None, None, None, None, None),
                 task_id=f"{task_id}-pair",
             )
+            logger.info("[%s] 成对切片任务已提交, tile_task_id=%s", task_id, tile_task_id)
             latest_info["tile_task_id"] = tile_task_id
             latest_info["tile_status"] = "processing"
             latest_info.pop("tile_error", None)

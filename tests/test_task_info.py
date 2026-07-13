@@ -18,6 +18,7 @@ from app import config
 from app import services
 from app import routes
 from app import tile_tasks
+from app import gdal_utils
 
 
 def test_runtime_dockerfile_copies_app_code():
@@ -908,6 +909,63 @@ def test_pair_webhook_starts_local_pair_tiling_after_both_odm_tasks_complete(tmp
     assert updated["compare"]["orthophoto_path"].endswith("orthophotos/compare.tif")
     assert updated["tile_status"] == "processing"
     assert updated["tile_task_id"] == "pair-tile-task-id"
+
+
+def test_aoi_crop_transforms_cutline_without_cutline_srs(tmp_path, monkeypatch):
+    input_tif = tmp_path / "source.tif"
+    output_tif = tmp_path / "orthophoto.tif"
+    input_tif.write_bytes(b"fake")
+
+    source_wkt = 'PROJCS["WGS 84 / UTM zone 51N"]'
+    commands = []
+
+    def fake_run_command(cmd, input_text=None):
+        commands.append(cmd)
+
+        class Result:
+            stdout = ""
+
+        if cmd[0] == "gdalinfo":
+            Result.stdout = json.dumps({
+                "coordinateSystem": {"wkt": source_wkt},
+                "cornerCoordinates": {},
+            })
+        elif cmd[0] == "gdaltransform":
+            assert cmd == ["gdaltransform", "-s_srs", "EPSG:4326", "-t_srs", source_wkt]
+            Result.stdout = "\n".join([
+                "370440 3313890 0",
+                "370800 3313890 0",
+                "370800 3314160 0",
+                "370440 3314160 0",
+                "370440 3313890 0",
+            ])
+        return Result()
+
+    monkeypatch.setattr(gdal_utils, "run_command", fake_run_command)
+
+    summary = gdal_utils.crop_orthophoto_to_aoi(
+        str(input_tif),
+        str(output_tif),
+        {
+            "type": "Polygon",
+            "coordinates": [[
+                [121.6584, 29.9504],
+                [121.6591, 29.9493],
+                [121.6605, 29.9499],
+                [121.6597, 29.9511],
+                [121.6584, 29.9504],
+            ]],
+        },
+        "EPSG:4326",
+    )
+
+    gdalwarp_cmd = next(cmd for cmd in commands if cmd[0] == "gdalwarp")
+    assert "-cutline_srs" not in gdalwarp_cmd
+    assert summary["aoi_crs"] == "EPSG:4326"
+    cutline = json.loads(Path(summary["cutline_path"]).read_text(encoding="utf-8"))
+    assert cutline["crs"]["properties"]["name"] == source_wkt
+    assert cutline["features"][0]["geometry"]["coordinates"][0][0] == [370440.0, 3313890.0]
+
 
 def test_tile_routes_are_registered():
     paths = set()

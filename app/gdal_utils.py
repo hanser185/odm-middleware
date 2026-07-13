@@ -85,6 +85,22 @@ def polygon_points(aoi_geojson: dict):
     raise RuntimeError("Only Polygon AOI is supported for aligned pair cropping")
 
 
+def transform_polygon(aoi_geojson: dict, source_crs: str, target_crs: str):
+    if aoi_geojson.get("type") != "Polygon":
+        raise RuntimeError("Only Polygon AOI is supported")
+
+    transformed_rings = []
+    for ring in aoi_geojson.get("coordinates", []):
+        points = [(float(point[0]), float(point[1])) for point in ring]
+        transformed_points = transform_points(points, source_crs, target_crs)
+        transformed_rings.append([[x, y] for x, y in transformed_points])
+
+    return {
+        "type": "Polygon",
+        "coordinates": transformed_rings,
+    }
+
+
 def align_bounds_to_grid(bounds: dict, tile_width_m: float, tile_height_m: float):
     return {
         "min_x": math.floor(float(bounds["min_x"]) / tile_width_m) * tile_width_m,
@@ -206,7 +222,16 @@ def crop_orthophoto_to_aoi(
     logger.info("[crop_orthophoto_to_aoi] 开始裁剪: %s -> %s, CRS=%s, bounds=%s",
                 input_tif, output_tif, aoi_crs, target_bounds)
     cutline_path = Path(output_tif).with_suffix(".aoi.geojson")
-    write_aoi_cutline(aoi_geojson, aoi_crs, cutline_path)
+    cutline_geojson = aoi_geojson
+    cutline_crs = aoi_crs
+    if aoi_crs:
+        source_info = load_gdal_json(input_tif)
+        source_wkt = source_info.get("coordinateSystem", {}).get("wkt")
+        if not source_wkt:
+            raise RuntimeError("Source CRS is missing; AOI crop requires georeferenced imagery.")
+        cutline_geojson = transform_polygon(aoi_geojson, aoi_crs, source_wkt)
+        cutline_crs = source_wkt
+    write_aoi_cutline(cutline_geojson, cutline_crs, cutline_path)
 
     cmd = [
         "gdalwarp",
@@ -243,8 +268,6 @@ def crop_orthophoto_to_aoi(
                 str(target_resolution["pixel_size_y"]),
             ]
         )
-    if aoi_crs:
-        cmd.extend(["-cutline_srs", aoi_crs])
     cmd.extend([input_tif, output_tif])
     run_command(cmd)
     logger.info("[crop_orthophoto_to_aoi] 裁剪完成: %s", output_tif)

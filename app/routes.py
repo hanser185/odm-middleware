@@ -156,6 +156,41 @@ def _write_pair_task_info(task_dir: Path, task_info: dict) -> None:
     path.write_text(json.dumps(task_info, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _sync_pair_tile_terminal_status(task_dir: Path, task_info: dict, tile_task: dict | None) -> dict:
+    if not tile_task:
+        return task_info
+    tile_status = tile_task.get("status")
+    if tile_status not in {"completed", "failed"}:
+        return task_info
+
+    changed = False
+    if task_info.get("status") != tile_status:
+        task_info["status"] = tile_status
+        changed = True
+    if task_info.get("tile_status") != tile_status:
+        task_info["tile_status"] = tile_status
+        changed = True
+
+    if tile_status == "failed":
+        error = tile_task.get("error")
+        if error and task_info.get("tile_error") != error:
+            task_info["tile_error"] = error
+            changed = True
+        if error and task_info.get("error") != error:
+            task_info["error"] = error
+            changed = True
+    else:
+        if task_info.pop("tile_error", None) is not None:
+            changed = True
+        if task_info.pop("error", None) is not None:
+            changed = True
+
+    if changed:
+        task_info["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _write_pair_task_info(task_dir, task_info)
+    return task_info
+
+
 def _require_pair_task(task_id: str) -> tuple[Path, dict]:
     _validate_task_id(task_id)
     task_dir = TEMP_DIR / task_id
@@ -222,9 +257,10 @@ def _phase_task_uuid(task_info: dict, phase: str) -> str:
     return phase_info["node_task_uuid"]
 
 
-def _pair_combined_status(task_id: str, task_info: dict) -> dict:
+def _pair_combined_status(task_id: str, task_dir: Path, task_info: dict) -> dict:
     tile_task_id = task_info.get("tile_task_id")
     tile_task = get_tile_task(tile_task_id) if tile_task_id else None
+    task_info = _sync_pair_tile_terminal_status(task_dir, task_info, tile_task)
     tile_status = (tile_task or {}).get("status") or task_info.get("tile_status", "waiting_for_orthophotos")
     base_status = task_info.get("base", {}).get("status", "unknown")
     compare_status = task_info.get("compare", {}).get("status", "unknown")
@@ -417,16 +453,19 @@ async def process_pair_and_tile_webhook(task_id: str, phase: str):
     except Exception as e:
         logger.warning("process-pair-and-tile webhook %s/%s 处理异常：%s", task_id, phase, e)
         task_info = _read_pair_task_info(task_dir)
+        task_info["status"] = "failed"
         task_info["tile_status"] = "failed"
         task_info["tile_error"] = str(e)
+        task_info["error"] = str(e)
+        task_info["updated_at"] = datetime.now(timezone.utc).isoformat()
         _write_pair_task_info(task_dir, task_info)
     return {"received": True}
 
 
 @router.get("/api/v1/process-pair-and-tile/{task_id}/status")
 async def get_process_pair_and_tile_status(task_id: str):
-    _, task_info = _require_pair_task(task_id)
-    return _pair_combined_status(task_id, task_info)
+    task_dir, task_info = _require_pair_task(task_id)
+    return _pair_combined_status(task_id, task_dir, task_info)
 
 
 @router.get("/api/v1/process-pair-and-tile/{task_id}/download/tiles-pair")

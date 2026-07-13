@@ -911,6 +911,92 @@ def test_pair_webhook_starts_local_pair_tiling_after_both_odm_tasks_complete(tmp
     assert updated["tile_task_id"] == "pair-tile-task-id"
 
 
+def test_process_pair_status_syncs_completed_tile_status_to_parent_task_info(tmp_path, monkeypatch):
+    task_id = "00000000-0000-0000-0000-000000000011"
+    task_dir = tmp_path / task_id
+    task_dir.mkdir()
+    task_info = {
+        "node_task_uuid": "base-node-uuid",
+        "workflow": "process_pair_and_tile",
+        "created_at": "2026-07-08T00:00:00+00:00",
+        "name": "pair-task",
+        "status": "queued",
+        "base": {"node_task_uuid": "base-node-uuid", "status": "completed", "files_count": 2},
+        "compare": {"node_task_uuid": "compare-node-uuid", "status": "completed", "files_count": 1},
+        "tile_status": "processing",
+        "tile_task_id": f"{task_id}-pair",
+    }
+    (task_dir / "task_info.json").write_text(json.dumps(task_info), encoding="utf-8")
+
+    monkeypatch.setattr(routes, "TEMP_DIR", tmp_path)
+    monkeypatch.setattr(
+        routes,
+        "get_tile_task",
+        lambda tile_task_id: {
+            "status": "completed",
+            "progress": 100,
+            "tiles_pair_zip_path": str(task_dir / "tiles_pair.zip"),
+        },
+    )
+
+    client = TestClient(main.app)
+    response = client.get(f"/api/v1/process-pair-and-tile/{task_id}/status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "completed"
+    assert data["tile_status"] == "completed"
+
+    updated = json.loads((task_dir / "task_info.json").read_text(encoding="utf-8"))
+    assert updated["status"] == "completed"
+    assert updated["tile_status"] == "completed"
+    assert "updated_at" in updated
+
+
+def test_process_pair_status_syncs_failed_tile_status_to_parent_task_info(tmp_path, monkeypatch):
+    task_id = "00000000-0000-0000-0000-000000000012"
+    task_dir = tmp_path / task_id
+    task_dir.mkdir()
+    task_info = {
+        "node_task_uuid": "base-node-uuid",
+        "workflow": "process_pair_and_tile",
+        "created_at": "2026-07-08T00:00:00+00:00",
+        "name": "pair-task",
+        "status": "queued",
+        "base": {"node_task_uuid": "base-node-uuid", "status": "completed", "files_count": 2},
+        "compare": {"node_task_uuid": "compare-node-uuid", "status": "completed", "files_count": 1},
+        "tile_status": "processing",
+        "tile_task_id": f"{task_id}-pair",
+    }
+    (task_dir / "task_info.json").write_text(json.dumps(task_info), encoding="utf-8")
+
+    monkeypatch.setattr(routes, "TEMP_DIR", tmp_path)
+    monkeypatch.setattr(
+        routes,
+        "get_tile_task",
+        lambda tile_task_id: {
+            "status": "failed",
+            "progress": 60,
+            "error": "tile failed",
+        },
+    )
+
+    client = TestClient(main.app)
+    response = client.get(f"/api/v1/process-pair-and-tile/{task_id}/status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "failed"
+    assert data["tile_status"] == "failed"
+    assert data["error"] == "tile failed"
+
+    updated = json.loads((task_dir / "task_info.json").read_text(encoding="utf-8"))
+    assert updated["status"] == "failed"
+    assert updated["tile_status"] == "failed"
+    assert updated["error"] == "tile failed"
+    assert updated["tile_error"] == "tile failed"
+
+
 def test_aoi_crop_transforms_cutline_without_cutline_srs(tmp_path, monkeypatch):
     input_tif = tmp_path / "source.tif"
     output_tif = tmp_path / "orthophoto.tif"
